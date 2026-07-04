@@ -1,0 +1,9 @@
+{
+  "employeeId": "EMP001",
+  "firstName": "Femi",
+  "lastName": "Falana",
+  "email": "myfemi2002@live.com",
+  "age": 24,
+  "department": "Engineering",
+  "isActive": true
+}
