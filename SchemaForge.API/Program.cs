@@ -1,11 +1,14 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
-using Json.Schema;
+using SchemaForge.API.Models;
+using SchemaForge.API.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddSingleton<SchemaCatalogService>();
+builder.Services.AddSingleton<SchemaDocumentService>();
+builder.Services.AddSingleton<SchemaValidationService>();
 
 var app = builder.Build();
 
@@ -17,36 +20,32 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-var schemaFilePath = Path.Combine(app.Environment.ContentRootPath, "Schemas", "employee.schema.json");
-var sampleFilePath = Path.Combine(app.Environment.ContentRootPath, "Samples", "employee.sample.json");
-
 app.MapGet("/", () => Results.Redirect("/swagger"))
     .ExcludeFromDescription();
 
-app.MapGet("/api/lessons/employee/sample", async () =>
+app.MapGet("/api/schemas", (SchemaCatalogService catalogService) =>
 {
-    var sampleJson = await File.ReadAllTextAsync(sampleFilePath);
-    return Results.Text(sampleJson, "application/json");
-})
-    .WithName("GetEmployeeSample")
-    .WithSummary("Gets the sample employee JSON document used in lesson 1.");
+    var schemas = catalogService.GetAll()
+        .Select(schema => new SchemaCatalogItemResponse(
+            schema.Key,
+            schema.Title,
+            schema.Description,
+            Path.GetFileName(schema.SchemaPath),
+            Path.GetFileName(schema.SamplePath)))
+        .ToArray();
 
-app.MapGet("/api/lessons/employee/schema", async () =>
-{
-    var schemaJson = await File.ReadAllTextAsync(schemaFilePath);
-    return Results.Text(schemaJson, "application/schema+json");
+    return Results.Ok(schemas);
 })
-    .WithName("GetEmployeeSchema")
-    .WithSummary("Gets the manual employee JSON Schema created in lesson 1.");
+    .WithName("GetSchemas")
+    .WithSummary("Gets the schema catalog currently available in SchemaForge.");
 
-app.MapGet("/api/lessons/employee/schema/summary", async () =>
+app.MapGet("/api/schemas/{key}", async (string key, SchemaCatalogService catalogService, SchemaDocumentService documentService) =>
 {
-    var schemaJson = await File.ReadAllTextAsync(schemaFilePath);
-    var schema = JsonSerializer.Deserialize<EmployeeSchemaDocument>(schemaJson)
-        ?? throw new InvalidOperationException("Unable to read the employee schema document.");
+    var definition = ResolveSchema(catalogService, key);
+    var schema = await documentService.ReadSchemaDocumentAsync(definition);
 
     var propertySummaries = schema.Properties
-        .Select(property => new EmployeeSchemaPropertySummary(
+        .Select(property => new SchemaPropertySummaryResponse(
             property.Key,
             property.Value.Type,
             schema.Required.Contains(property.Key),
@@ -57,7 +56,83 @@ app.MapGet("/api/lessons/employee/schema/summary", async () =>
             property.Value.Maximum))
         .ToArray();
 
-    return Results.Ok(new EmployeeSchemaSummaryResponse(
+    return Results.Ok(new SchemaSummaryResponse(
+        definition.Key,
+        schema.Title,
+        schema.Type,
+        propertySummaries));
+})
+    .WithName("GetSchemaSummary")
+    .WithSummary("Gets a schema summary from the schema catalog.");
+
+app.MapGet("/api/schemas/{key}/document", async (string key, SchemaCatalogService catalogService, SchemaDocumentService documentService) =>
+{
+    var definition = ResolveSchema(catalogService, key);
+    var schemaJson = await documentService.ReadSchemaJsonAsync(definition);
+
+    return Results.Text(schemaJson, "application/schema+json");
+})
+    .WithName("GetSchemaDocument")
+    .WithSummary("Gets the raw JSON Schema document for a catalog schema.");
+
+app.MapGet("/api/schemas/{key}/sample", async (string key, SchemaCatalogService catalogService, SchemaDocumentService documentService) =>
+{
+    var definition = ResolveSchema(catalogService, key);
+    var sampleJson = await documentService.ReadSampleJsonAsync(definition);
+
+    return Results.Text(sampleJson, "application/json");
+})
+    .WithName("GetSchemaSample")
+    .WithSummary("Gets the sample JSON payload for a catalog schema.");
+
+app.MapPost("/api/schemas/{key}/validate", async (string key, JsonElement payload, SchemaCatalogService catalogService, SchemaDocumentService documentService, SchemaValidationService validationService) =>
+{
+    var definition = ResolveSchema(catalogService, key);
+    var schema = await documentService.ReadCompiledSchemaAsync(definition);
+    var report = validationService.Validate(definition, schema, payload);
+
+    return Results.Ok(report);
+})
+    .WithName("ValidateSchemaPayload")
+    .WithSummary("Validates a JSON payload against a named schema in the catalog.");
+
+app.MapGet("/api/lessons/employee/sample", async (SchemaCatalogService catalogService, SchemaDocumentService documentService) =>
+{
+    var definition = catalogService.GetByKey("employee");
+    var sampleJson = await documentService.ReadSampleJsonAsync(definition);
+    return Results.Text(sampleJson, "application/json");
+})
+    .WithName("GetEmployeeSample")
+    .WithSummary("Gets the sample employee JSON document used in lesson 1.");
+
+app.MapGet("/api/lessons/employee/schema", async (SchemaCatalogService catalogService, SchemaDocumentService documentService) =>
+{
+    var definition = catalogService.GetByKey("employee");
+    var schemaJson = await documentService.ReadSchemaJsonAsync(definition);
+    return Results.Text(schemaJson, "application/schema+json");
+})
+    .WithName("GetEmployeeSchema")
+    .WithSummary("Gets the manual employee JSON Schema created in lesson 1.");
+
+app.MapGet("/api/lessons/employee/schema/summary", async (SchemaCatalogService catalogService, SchemaDocumentService documentService) =>
+{
+    var definition = catalogService.GetByKey("employee");
+    var schema = await documentService.ReadSchemaDocumentAsync(definition);
+
+    var propertySummaries = schema.Properties
+        .Select(property => new SchemaPropertySummaryResponse(
+            property.Key,
+            property.Value.Type,
+            schema.Required.Contains(property.Key),
+            property.Value.Description,
+            property.Value.MinLength,
+            property.Value.Format,
+            property.Value.Minimum,
+            property.Value.Maximum))
+        .ToArray();
+
+    return Results.Ok(new SchemaSummaryResponse(
+        definition.Key,
         schema.Title,
         schema.Type,
         propertySummaries));
@@ -65,120 +140,29 @@ app.MapGet("/api/lessons/employee/schema/summary", async () =>
     .WithName("GetEmployeeSchemaSummary")
     .WithSummary("Explains the employee schema in an API-friendly shape.");
 
-app.MapPost("/api/lessons/employee/validate", async (JsonElement payload) =>
+app.MapPost("/api/lessons/employee/validate", async (JsonElement payload, SchemaCatalogService catalogService, SchemaDocumentService documentService, SchemaValidationService validationService) =>
 {
-    var schemaJson = await File.ReadAllTextAsync(schemaFilePath);
-    var schema = JsonSchema.FromText(schemaJson);
-    var report = EmployeeSchemaValidationService.Validate(schema, payload);
+    var definition = catalogService.GetByKey("employee");
+    var schema = await documentService.ReadCompiledSchemaAsync(definition);
+    var report = validationService.Validate(definition, schema, payload);
 
     return Results.Ok(report);
 })
     .WithName("ValidateEmployeePayload")
     .WithSummary("Validates an employee JSON payload and returns a structured validation report.");
 
-app.Run();
-
-internal static class EmployeeSchemaValidationService
+SchemaDefinition ResolveSchema(SchemaCatalogService catalogService, string key)
 {
-    public static EmployeeValidationReportResponse Validate(JsonSchema schema, JsonElement payload)
+    try
     {
-        var evaluation = schema.Evaluate(payload);
-        var reportNode = JsonSerializer.SerializeToNode(evaluation) as JsonObject;
-        var errors = new List<EmployeeValidationIssue>();
-
-        CollectErrors(reportNode, errors);
-
-        if (!evaluation.IsValid && errors.Count == 0)
-        {
-            errors.Add(new EmployeeValidationIssue(
-                Keyword: "schema",
-                Message: "Payload failed JSON Schema validation.",
-                EvaluationPath: reportNode?["evaluationPath"]?.GetValue<string>(),
-                InstanceLocation: reportNode?["instanceLocation"]?.GetValue<string>(),
-                SchemaLocation: reportNode?["schemaLocation"]?.GetValue<string>()));
-        }
-
-        return new EmployeeValidationReportResponse(
-            SchemaTitle: "Employee",
-            EvaluatedAtUtc: DateTime.UtcNow,
-            IsValid: evaluation.IsValid,
-            ErrorCount: errors.Count,
-            Errors: errors.ToArray(),
-            Report: reportNode);
+        return catalogService.GetByKey(key);
     }
-
-    private static void CollectErrors(JsonObject? reportNode, List<EmployeeValidationIssue> errors)
+    catch (KeyNotFoundException)
     {
-        if (reportNode is null)
-        {
-            return;
-        }
-
-        if (reportNode["errors"] is JsonObject errorObject)
-        {
-            foreach (var entry in errorObject)
-            {
-                errors.Add(new EmployeeValidationIssue(
-                    Keyword: entry.Key,
-                    Message: entry.Value?.GetValue<string>() ?? "Validation failed.",
-                    EvaluationPath: reportNode["evaluationPath"]?.GetValue<string>(),
-                    InstanceLocation: reportNode["instanceLocation"]?.GetValue<string>(),
-                    SchemaLocation: reportNode["schemaLocation"]?.GetValue<string>()));
-            }
-        }
-
-        if (reportNode["details"] is JsonArray details)
-        {
-            foreach (var child in details.OfType<JsonObject>())
-            {
-                CollectErrors(child, errors);
-            }
-        }
+        throw new BadHttpRequestException($"Schema '{key}' was not found.", statusCode: StatusCodes.Status404NotFound);
     }
 }
 
-internal sealed record EmployeeSchemaSummaryResponse(
-    string Title,
-    string Type,
-    EmployeeSchemaPropertySummary[] Properties);
-
-internal sealed record EmployeeSchemaPropertySummary(
-    string Name,
-    string Type,
-    bool IsRequired,
-    string? Description,
-    int? MinLength,
-    string? Format,
-    int? Minimum,
-    int? Maximum);
-
-internal sealed record EmployeeSchemaDocument(
-    string Title,
-    string Type,
-    Dictionary<string, EmployeeSchemaProperty> Properties,
-    string[] Required);
-
-internal sealed record EmployeeSchemaProperty(
-    string Type,
-    string? Description,
-    int? MinLength,
-    string? Format,
-    int? Minimum,
-    int? Maximum);
-
-internal sealed record EmployeeValidationReportResponse(
-    string SchemaTitle,
-    DateTime EvaluatedAtUtc,
-    bool IsValid,
-    int ErrorCount,
-    EmployeeValidationIssue[] Errors,
-    JsonObject? Report);
-
-internal sealed record EmployeeValidationIssue(
-    string Keyword,
-    string Message,
-    string? EvaluationPath,
-    string? InstanceLocation,
-    string? SchemaLocation);
+app.Run();
 
 public partial class Program;

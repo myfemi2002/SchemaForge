@@ -104,4 +104,31 @@ public sealed class EmployeeSchemaTests
         Assert.NotNull(errors);
         Assert.NotEmpty(errors!);
     }
+
+    [Fact]
+    public async Task SchemaCatalogEndpoint_ShouldListEmployeeSchema()
+    {
+        using var client = Factory.CreateClient();
+
+        using var response = await client.GetAsync("/api/schemas");
+        var responseJson = JsonNode.Parse(await response.Content.ReadAsStringAsync())?.AsArray();
+
+        response.EnsureSuccessStatusCode();
+        Assert.NotNull(responseJson);
+        Assert.Contains(responseJson!, item => item?["key"]?.GetValue<string>() == "employee");
+    }
+
+    [Fact]
+    public async Task NamedSchemaValidationEndpoint_ShouldValidateEmployeePayload()
+    {
+        using var client = Factory.CreateClient();
+        using var content = JsonContent.Create(JsonNode.Parse(File.ReadAllText(SamplePath)));
+
+        using var response = await client.PostAsync("/api/schemas/employee/validate", content);
+        var responseJson = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+
+        response.EnsureSuccessStatusCode();
+        Assert.Equal("employee", responseJson?["schemaKey"]?.GetValue<string>());
+        Assert.True(responseJson?["isValid"]?.GetValue<bool>());
+    }
 }
