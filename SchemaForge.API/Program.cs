@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Json.Schema;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -63,7 +65,77 @@ app.MapGet("/api/lessons/employee/schema/summary", async () =>
     .WithName("GetEmployeeSchemaSummary")
     .WithSummary("Explains the employee schema in an API-friendly shape.");
 
+app.MapPost("/api/lessons/employee/validate", async (JsonElement payload) =>
+{
+    var schemaJson = await File.ReadAllTextAsync(schemaFilePath);
+    var schema = JsonSchema.FromText(schemaJson);
+    var report = EmployeeSchemaValidationService.Validate(schema, payload);
+
+    return Results.Ok(report);
+})
+    .WithName("ValidateEmployeePayload")
+    .WithSummary("Validates an employee JSON payload and returns a structured validation report.");
+
 app.Run();
+
+internal static class EmployeeSchemaValidationService
+{
+    public static EmployeeValidationReportResponse Validate(JsonSchema schema, JsonElement payload)
+    {
+        var evaluation = schema.Evaluate(payload);
+        var reportNode = JsonSerializer.SerializeToNode(evaluation) as JsonObject;
+        var errors = new List<EmployeeValidationIssue>();
+
+        CollectErrors(reportNode, errors);
+
+        if (!evaluation.IsValid && errors.Count == 0)
+        {
+            errors.Add(new EmployeeValidationIssue(
+                Keyword: "schema",
+                Message: "Payload failed JSON Schema validation.",
+                EvaluationPath: reportNode?["evaluationPath"]?.GetValue<string>(),
+                InstanceLocation: reportNode?["instanceLocation"]?.GetValue<string>(),
+                SchemaLocation: reportNode?["schemaLocation"]?.GetValue<string>()));
+        }
+
+        return new EmployeeValidationReportResponse(
+            SchemaTitle: "Employee",
+            EvaluatedAtUtc: DateTime.UtcNow,
+            IsValid: evaluation.IsValid,
+            ErrorCount: errors.Count,
+            Errors: errors.ToArray(),
+            Report: reportNode);
+    }
+
+    private static void CollectErrors(JsonObject? reportNode, List<EmployeeValidationIssue> errors)
+    {
+        if (reportNode is null)
+        {
+            return;
+        }
+
+        if (reportNode["errors"] is JsonObject errorObject)
+        {
+            foreach (var entry in errorObject)
+            {
+                errors.Add(new EmployeeValidationIssue(
+                    Keyword: entry.Key,
+                    Message: entry.Value?.GetValue<string>() ?? "Validation failed.",
+                    EvaluationPath: reportNode["evaluationPath"]?.GetValue<string>(),
+                    InstanceLocation: reportNode["instanceLocation"]?.GetValue<string>(),
+                    SchemaLocation: reportNode["schemaLocation"]?.GetValue<string>()));
+            }
+        }
+
+        if (reportNode["details"] is JsonArray details)
+        {
+            foreach (var child in details.OfType<JsonObject>())
+            {
+                CollectErrors(child, errors);
+            }
+        }
+    }
+}
 
 internal sealed record EmployeeSchemaSummaryResponse(
     string Title,
@@ -93,3 +165,20 @@ internal sealed record EmployeeSchemaProperty(
     string? Format,
     int? Minimum,
     int? Maximum);
+
+internal sealed record EmployeeValidationReportResponse(
+    string SchemaTitle,
+    DateTime EvaluatedAtUtc,
+    bool IsValid,
+    int ErrorCount,
+    EmployeeValidationIssue[] Errors,
+    JsonObject? Report);
+
+internal sealed record EmployeeValidationIssue(
+    string Keyword,
+    string Message,
+    string? EvaluationPath,
+    string? InstanceLocation,
+    string? SchemaLocation);
+
+public partial class Program;

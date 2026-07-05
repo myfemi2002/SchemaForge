@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Json.Schema;
 using Xunit;
 
@@ -21,6 +23,8 @@ public sealed class EmployeeSchemaTests
         "SchemaForge.API",
         "Samples",
         "employee.sample.json");
+
+    private static readonly WebApplicationFactory<Program> Factory = new();
 
     [Fact]
     public void EmployeeSample_ShouldMatchEmployeeSchema()
@@ -61,5 +65,43 @@ public sealed class EmployeeSchemaTests
         var results = schema.Evaluate(invalidPayloadDocument.RootElement);
 
         Assert.False(results.IsValid);
+    }
+
+    [Fact]
+    public async Task ValidationEndpoint_ShouldAcceptValidEmployeePayload()
+    {
+        using var client = Factory.CreateClient();
+        using var content = JsonContent.Create(JsonNode.Parse(File.ReadAllText(SamplePath)));
+
+        using var response = await client.PostAsync("/api/lessons/employee/validate", content);
+        var responseJson = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+
+        response.EnsureSuccessStatusCode();
+        Assert.True(responseJson?["isValid"]?.GetValue<bool>());
+        Assert.Equal(0, responseJson?["errorCount"]?.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task ValidationEndpoint_ShouldReturnStructuredErrors_ForInvalidEmployeePayload()
+    {
+        using var client = Factory.CreateClient();
+        using var content = JsonContent.Create(new
+        {
+            employeeId = "EMP001",
+            firstName = "F",
+            lastName = "Falana",
+            age = 17,
+            department = "Engineering",
+            isActive = true
+        });
+
+        using var response = await client.PostAsync("/api/lessons/employee/validate", content);
+        var responseJson = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+        var errors = responseJson?["errors"]?.AsArray();
+
+        response.EnsureSuccessStatusCode();
+        Assert.False(responseJson?["isValid"]?.GetValue<bool>());
+        Assert.NotNull(errors);
+        Assert.NotEmpty(errors!);
     }
 }
